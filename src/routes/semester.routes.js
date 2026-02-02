@@ -182,9 +182,9 @@ router.post(
       const semesterId = Number(req.params.semesterId);
       const db = getDb();
 
-      // Verify semester exists and get hostel_id
+      // Verify semester exists and get hostel_id and is_active
       const [semesterRows] = await db.execute(
-        'SELECT id, hostel_id FROM semesters WHERE id = ? LIMIT 1',
+        'SELECT id, hostel_id, is_active FROM semesters WHERE id = ? LIMIT 1',
         [semesterId]
       );
 
@@ -202,6 +202,22 @@ router.post(
         }
         if (Number(effectiveHostelId) !== Number(req.user.hostelId)) {
           return res.status(403).json({ error: 'Semester does not belong to your hostel' });
+        }
+      }
+
+      // IDEMPOTENCY: Check if semester is already active
+      if (semester.is_active === 1) {
+        // Check if there are other active semesters (shouldn't happen, but handle gracefully)
+        const [otherActive] = await db.execute(
+          'SELECT COUNT(*) AS count FROM semesters WHERE hostel_id = ? AND is_active = 1 AND id != ?',
+          [effectiveHostelId, semesterId]
+        );
+        
+        if (otherActive[0].count === 0) {
+          return res.json({ 
+            message: 'Semester is already active. This operation is idempotent.',
+            alreadyActive: true
+          });
         }
       }
 
@@ -254,9 +270,9 @@ router.post(
       const semesterId = Number(req.params.semesterId);
       const db = getDb();
 
-      // Verify semester exists and get hostel_id
+      // Verify semester exists and get hostel_id and is_active
       const [semesterRows] = await db.execute(
-        'SELECT id, hostel_id FROM semesters WHERE id = ? LIMIT 1',
+        'SELECT id, hostel_id, is_active FROM semesters WHERE id = ? LIMIT 1',
         [semesterId]
       );
 
@@ -275,6 +291,14 @@ router.post(
         if (Number(effectiveHostelId) !== Number(req.user.hostelId)) {
           return res.status(403).json({ error: 'Semester does not belong to your hostel' });
         }
+      }
+
+      // IDEMPOTENCY: Check if semester is already inactive
+      if (semester.is_active === 0) {
+        return res.json({ 
+          message: 'Semester is already inactive. This operation is idempotent.',
+          alreadyInactive: true
+        });
       }
 
       // Deactivate the semester

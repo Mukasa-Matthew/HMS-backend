@@ -79,6 +79,25 @@ router.post(
         return res.status(400).json({ error: 'Student is not registered for a semester' });
       }
 
+      // IDEMPOTENCY: Check if student already has an allocation for this semester
+      const [existingAllocation] = await db.execute(
+        'SELECT id, room_id FROM allocations WHERE student_id = ? AND semester_id = ? LIMIT 1',
+        [studentId, studentSemesterId]
+      );
+
+      if (existingAllocation.length > 0) {
+        const existingRoomId = existingAllocation[0].room_id;
+        if (Number(existingRoomId) === Number(roomId)) {
+          return res.status(409).json({ 
+            error: 'Student is already allocated to this room for this semester. This operation is idempotent.' 
+          });
+        } else {
+          return res.status(409).json({ 
+            error: `Student already has an allocation for this semester (room ID: ${existingRoomId}). Please remove the existing allocation first if you want to change rooms.` 
+          });
+        }
+      }
+
       // Check room capacity - count current active allocations for this room in the current semester
       // Only count allocations where students haven't checked out
       const [activeAllocations] = await db.execute(
@@ -236,6 +255,25 @@ router.post(
       if (amount > currentBalance) {
         return res.status(400).json({ 
           error: `Payment amount (${amount.toLocaleString()}) exceeds the outstanding balance (${currentBalance.toLocaleString()}). Maximum allowed: ${currentBalance.toLocaleString()}` 
+        });
+      }
+
+      // IDEMPOTENCY: Check for duplicate payment within last 5 seconds (same amount, same allocation, same user)
+      // This prevents accidental double-submission from frontend
+      const [recentPayment] = await db.execute(
+        `SELECT id FROM payments 
+         WHERE allocation_id = ? 
+           AND amount = ? 
+           AND recorded_by_user_id = ?
+           AND recorded_at >= DATE_SUB(NOW(), INTERVAL 5 SECOND)
+         LIMIT 1`,
+        [allocationId, amount, req.user.sub]
+      );
+
+      if (recentPayment.length > 0) {
+        return res.status(409).json({ 
+          error: 'A payment with the same amount was recorded very recently. This may be a duplicate request. Please refresh and check if the payment was already recorded.',
+          paymentId: recentPayment[0].id
         });
       }
 
