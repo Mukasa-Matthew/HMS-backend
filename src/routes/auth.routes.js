@@ -36,22 +36,36 @@ function getCookieBaseOptions(req) {
   // Check multiple ways to detect HTTPS (for different proxy configurations)
   const forwardedProto = req.headers['x-forwarded-proto'];
   const forwardedSsl = req.headers['x-forwarded-ssl'];
+  const host = req.headers.host || '';
+  
+  // Detect if we're in production (HTTPS API domain)
+  const isProductionDomain = host.includes('hmsapi.martomor.xyz') || 
+                             host.includes('martomor.xyz');
+  
   const isSecure =
     req.secure ||
     forwardedProto === 'https' ||
     forwardedSsl === 'on' ||
-    req.headers['x-forwarded-proto']?.includes('https');
+    forwardedProto?.includes('https') ||
+    isProductionDomain; // If it's the production domain, assume HTTPS
 
-  // In production (HTTPS), always use SameSite=None; Secure for cross-site cookies
+  // Always use SameSite=None; Secure for cross-site cookies in production
   // For localhost, use Lax
-  const isProduction = isSecure || process.env.NODE_ENV === 'production';
-  const sameSite = isProduction ? 'none' : 'lax';
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+  const useCrossSiteCookies = isSecure && !isLocalhost;
+  
+  const sameSite = useCrossSiteCookies ? 'none' : 'lax';
+  const secure = useCrossSiteCookies; // Must be true for SameSite=None
 
   // Debug logging (remove in production if too verbose)
   if (process.env.DEBUG_COOKIES === 'true') {
     console.log('Cookie options:', {
-      secure: isSecure,
+      host,
+      isProductionDomain,
+      isLocalhost,
+      isSecure,
       sameSite,
+      secure,
       forwardedProto,
       reqSecure: req.secure,
       nodeEnv: process.env.NODE_ENV,
@@ -60,7 +74,7 @@ function getCookieBaseOptions(req) {
 
   return {
     httpOnly: true,
-    secure: isProduction, // Must be true for SameSite=None
+    secure: secure, // Must be true for SameSite=None
     sameSite: sameSite,
     // Don't set domain - let browser handle it for cross-site cookies
     // path: '/' is default, which is what we want
@@ -138,6 +152,17 @@ router.post('/login', async (req, res, next) => {
 
     const baseCookieOptions = getCookieBaseOptions(req);
 
+    // Debug: Log cookie options being used
+    if (process.env.DEBUG_COOKIES === 'true') {
+      console.log('Setting cookies with options:', {
+        ...baseCookieOptions,
+        accessTokenLength: accessToken.length,
+        refreshTokenLength: refreshToken.length,
+        origin: req.headers.origin,
+        host: req.headers.host,
+      });
+    }
+
     // Set httpOnly cookies so frontend JS cannot read tokens directly
     res.cookie('hms_access', accessToken, {
       ...baseCookieOptions,
@@ -147,6 +172,9 @@ router.post('/login', async (req, res, next) => {
       ...baseCookieOptions,
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     });
+
+    // Log that cookies were set (for debugging)
+    console.log(`Cookies set for user ${user.username} - SameSite: ${baseCookieOptions.sameSite}, Secure: ${baseCookieOptions.secure}`);
 
     await writeAuditLog(db, req, {
       action: 'LOGIN_SUCCESS',
