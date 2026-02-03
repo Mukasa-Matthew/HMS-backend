@@ -90,18 +90,19 @@ router.post('/login', async (req, res, next) => {
     });
 
     const isProduction = process.env.NODE_ENV === 'production';
+    const sameSite = isProduction ? 'none' : 'lax';
 
     // Set httpOnly cookies so frontend JS cannot read tokens directly
     res.cookie('hms_access', accessToken, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: 'lax',
+      sameSite,
       maxAge: 1000 * 60 * 15, // 15 minutes
     });
     res.cookie('hms_refresh', refreshToken, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: 'lax',
+      sameSite,
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     });
 
@@ -152,10 +153,12 @@ router.post('/refresh', async (req, res, next) => {
       });
 
       const isProduction = process.env.NODE_ENV === 'production';
+      const sameSite = isProduction ? 'none' : 'lax';
+
       res.cookie('hms_access', accessToken, {
         httpOnly: true,
         secure: isProduction,
-        sameSite: 'lax',
+        sameSite,
         maxAge: 1000 * 60 * 15,
       });
 
@@ -178,15 +181,18 @@ router.post('/logout', authenticateToken, async (req, res, next) => {
     });
 
     // Clear cookies
+    const isProduction = process.env.NODE_ENV === 'production';
+    const sameSite = isProduction ? 'none' : 'lax';
+
     res.clearCookie('hms_access', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite,
     });
     res.clearCookie('hms_refresh', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite,
     });
 
     return res.json({ message: 'Logged out successfully' });
