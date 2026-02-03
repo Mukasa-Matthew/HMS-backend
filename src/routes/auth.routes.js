@@ -16,8 +16,34 @@ const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 
 if (!ACCESS_SECRET || !REFRESH_SECRET) {
   console.error('ERROR: JWT secrets are required!');
-  console.error('Please set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET in your .env file');
+  console.error(
+    'Please set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET in your .env file',
+  );
   process.exit(1);
+}
+
+/**
+ * Cookie options helper
+ *
+ * - When the API is served over HTTPS (behind a proxy / on production),
+ *   we must use SameSite=None; Secure so that cookies can be sent from
+ *   the Netlify frontend (https://marthms.netlify.app) to the API
+ *   (https://hmsapi.martomor.xyz).
+ * - For local development over http://localhost we fall back to
+ *   SameSite=Lax and secure=false so cookies still work.
+ */
+function getCookieBaseOptions(req) {
+  const isSecure =
+    req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+  // Cross-site (Netlify → API) requires SameSite=None and Secure
+  const sameSite = isSecure ? 'none' : 'lax';
+
+  return {
+    httpOnly: true,
+    secure: isSecure,
+    sameSite,
+  };
 }
 
 const loginSchema = Joi.object({
@@ -89,20 +115,15 @@ router.post('/login', async (req, res, next) => {
       expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
     });
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    const sameSite = isProduction ? 'none' : 'lax';
+    const baseCookieOptions = getCookieBaseOptions(req);
 
     // Set httpOnly cookies so frontend JS cannot read tokens directly
     res.cookie('hms_access', accessToken, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite,
+      ...baseCookieOptions,
       maxAge: 1000 * 60 * 15, // 15 minutes
     });
     res.cookie('hms_refresh', refreshToken, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite,
+      ...baseCookieOptions,
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     });
 
@@ -152,13 +173,10 @@ router.post('/refresh', async (req, res, next) => {
         expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
       });
 
-      const isProduction = process.env.NODE_ENV === 'production';
-      const sameSite = isProduction ? 'none' : 'lax';
+      const baseCookieOptions = getCookieBaseOptions(req);
 
       res.cookie('hms_access', accessToken, {
-        httpOnly: true,
-        secure: isProduction,
-        sameSite,
+        ...baseCookieOptions,
         maxAge: 1000 * 60 * 15,
       });
 
@@ -180,20 +198,11 @@ router.post('/logout', authenticateToken, async (req, res, next) => {
       details: { username: req.user?.username || null },
     });
 
-    // Clear cookies
-    const isProduction = process.env.NODE_ENV === 'production';
-    const sameSite = isProduction ? 'none' : 'lax';
+    // Clear cookies using same attributes they were set with
+    const baseCookieOptions = getCookieBaseOptions(req);
 
-    res.clearCookie('hms_access', {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite,
-    });
-    res.clearCookie('hms_refresh', {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite,
-    });
+    res.clearCookie('hms_access', baseCookieOptions);
+    res.clearCookie('hms_refresh', baseCookieOptions);
 
     return res.json({ message: 'Logged out successfully' });
   } catch (err) {
