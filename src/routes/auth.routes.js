@@ -152,18 +152,8 @@ router.post('/login', async (req, res, next) => {
 
     const baseCookieOptions = getCookieBaseOptions(req);
 
-    // Debug: Log cookie options being used
-    if (process.env.DEBUG_COOKIES === 'true') {
-      console.log('Setting cookies with options:', {
-        ...baseCookieOptions,
-        accessTokenLength: accessToken.length,
-        refreshTokenLength: refreshToken.length,
-        origin: req.headers.origin,
-        host: req.headers.host,
-      });
-    }
-
     // Set httpOnly cookies so frontend JS cannot read tokens directly
+    // This prevents XSS attacks from stealing tokens
     res.cookie('hms_access', accessToken, {
       ...baseCookieOptions,
       maxAge: 1000 * 60 * 15, // 15 minutes
@@ -173,8 +163,10 @@ router.post('/login', async (req, res, next) => {
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
     });
 
-    // Log that cookies were set (for debugging)
-    console.log(`Cookies set for user ${user.username} - SameSite: ${baseCookieOptions.sameSite}, Secure: ${baseCookieOptions.secure}`);
+    // Log successful login (only log username, not sensitive data)
+    if (process.env.DEBUG_COOKIES === 'true') {
+      console.log(`Login: ${user.username} - Cookies set (SameSite: ${baseCookieOptions.sameSite}, Secure: ${baseCookieOptions.secure})`);
+    }
 
     await writeAuditLog(db, req, {
       action: 'LOGIN_SUCCESS',
@@ -183,8 +175,8 @@ router.post('/login', async (req, res, next) => {
       details: { username: user.username, role: user.role, hostelId: user.hostel_id || null },
     });
 
-    // Return user info and tokens (tokens also in cookies, but this is a fallback)
-    // Frontend should prefer cookies, but can use these if cookies fail
+    // Return user info only - tokens are in httpOnly cookies for security
+    // Never expose tokens in response body to prevent XSS attacks
     return res.json({
       user: {
         id: user.id,
@@ -192,10 +184,6 @@ router.post('/login', async (req, res, next) => {
         role: user.role,
         hostelId: user.hostel_id || null,
       },
-      // Temporary fallback: include tokens in response if cookies fail
-      // Frontend should check cookies first, then fall back to these
-      accessToken: accessToken,
-      refreshToken: refreshToken,
     });
   } catch (err) {
     return next(err);
@@ -208,26 +196,13 @@ router.post('/refresh', async (req, res, next) => {
     const refreshTokenFromCookie = req.cookies?.hms_refresh;
     const token = refreshTokenFromCookie || refreshTokenFromBody;
 
-    // Debug logging for cookie issues
-    if (process.env.DEBUG_COOKIES === 'true') {
-      console.log('Refresh endpoint:', {
-        hasCookie: !!refreshTokenFromCookie,
-        hasBodyToken: !!refreshTokenFromBody,
-        cookies: Object.keys(req.cookies || {}),
-        origin: req.headers.origin,
-        referer: req.headers.referer,
-      });
-    }
-
     if (!token) {
-      // More detailed error for debugging
-      const errorMsg = refreshTokenFromCookie
-        ? 'Refresh token cookie exists but is invalid'
-        : 'Refresh token is required (no cookie or body token)';
+      // Log refresh failure for debugging (only if enabled)
       if (process.env.DEBUG_COOKIES === 'true') {
-        console.log('Refresh failed:', errorMsg, {
-          cookies: req.cookies,
-          body: req.body,
+        console.log('Refresh failed: No token found', {
+          hasCookie: !!refreshTokenFromCookie,
+          hasBodyToken: !!refreshTokenFromBody,
+          origin: req.headers.origin,
         });
       }
       return res.status(400).json({ error: 'Refresh token is required' });
@@ -300,8 +275,14 @@ router.get('/me', authenticateToken, (req, res) => {
   });
 });
 
-// Comprehensive diagnostic endpoint
+// Diagnostic endpoint - only available in development or with DEBUG_COOKIES enabled
+// In production, this should be protected or removed
 router.get('/diagnostics', (req, res) => {
+  // Only allow in development or when explicitly enabled
+  if (process.env.NODE_ENV === 'production' && process.env.DEBUG_COOKIES !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   const baseCookieOptions = getCookieBaseOptions(req);
   
   // Try to set a test cookie
@@ -311,29 +292,22 @@ router.get('/diagnostics', (req, res) => {
   });
 
   return res.json({
-    message: 'Diagnostic information',
-    receivedCookies: req.cookies || {},
-    cookieKeys: req.cookies ? Object.keys(req.cookies) : [],
-    cookieOptions: baseCookieOptions,
+    message: 'Diagnostic information (development only)',
+    cookieStatus: {
+      hasAccessToken: !!req.cookies?.hms_access,
+      hasRefreshToken: !!req.cookies?.hms_refresh,
+      cookieKeys: req.cookies ? Object.keys(req.cookies) : [],
+    },
+    cookieOptions: {
+      sameSite: baseCookieOptions.sameSite,
+      secure: baseCookieOptions.secure,
+      httpOnly: baseCookieOptions.httpOnly,
+    },
     requestInfo: {
       host: req.headers.host,
       origin: req.headers.origin,
-      referer: req.headers.referer,
-      'user-agent': req.headers['user-agent'],
-      'x-forwarded-proto': req.headers['x-forwarded-proto'],
-      'x-forwarded-ssl': req.headers['x-forwarded-ssl'],
-    },
-    serverInfo: {
       secure: req.secure,
-      nodeEnv: process.env.NODE_ENV,
-      hasAccessToken: !!req.cookies?.hms_access,
-      hasRefreshToken: !!req.cookies?.hms_refresh,
-    },
-    instructions: {
-      step1: 'Check if test_cookie appears in your browser DevTools → Application → Cookies',
-      step2: 'If test_cookie is NOT visible, cookies are being blocked',
-      step3: 'Check browser settings: Allow third-party cookies must be enabled',
-      step4: 'Check if SameSite=None and Secure flags are set correctly',
+      forwardedProto: req.headers['x-forwarded-proto'],
     },
   });
 });

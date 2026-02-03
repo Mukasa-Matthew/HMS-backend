@@ -27,7 +27,22 @@ const app = express();
 app.set('trust proxy', 1);
 
 // Core security middlewares (similar intent to Java EE security filters)
-app.use(helmet());
+// Helmet helps secure Express apps by setting various HTTP headers
+app.use(
+  helmet({
+    // Allow cookies to work cross-site (needed for Netlify frontend)
+    crossOriginEmbedderPolicy: false,
+    // Configure CSP to allow necessary resources
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+      },
+    },
+  }),
+);
 
 // CORS configuration - always include Netlify URL
 const getCorsOrigins = () => {
@@ -64,8 +79,12 @@ app.use(
     optionsSuccessStatus: 204,
   }),
 );
-app.use(morgan('dev'));
-app.use(express.json());
+// Logging - use 'combined' in production for better logs
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// Request size limits to prevent DoS attacks
+app.use(express.json({ limit: '10mb' })); // Limit JSON payloads
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Limit URL-encoded payloads
 app.use(cookieParser());
 
 // Debug middleware to log all incoming cookies (only if DEBUG_COOKIES is enabled)
@@ -115,11 +134,39 @@ app.use('/api/owner', studentRoutes); // Owner-specific endpoints
 // Global error handler (similar to Java exception mappers)
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-  console.error(err);
+  // Log error with context (but don't expose sensitive details)
   const status = err.status || 500;
+  const isDevelopment = process.env.NODE_ENV !== 'production';
+  
+  // Log full error in development, sanitized in production
+  if (isDevelopment) {
+    console.error('Error:', {
+      message: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+    });
+  } else {
+    // In production, log errors but don't expose stack traces
+    console.error('Error:', {
+      message: err.message,
+      path: req.path,
+      method: req.method,
+      status,
+    });
+  }
+
+  // Don't expose internal error details to clients
   const message =
-    status === 500 ? 'Internal server error' : err.message || 'Error';
-  res.status(status).json({ error: message });
+    status === 500
+      ? 'Internal server error'
+      : err.message || 'An error occurred';
+
+  res.status(status).json({
+    error: message,
+    // Only include status code, not stack traces
+    ...(isDevelopment && err.stack ? { stack: err.stack } : {}),
+  });
 });
 
 module.exports = app;
