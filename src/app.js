@@ -24,18 +24,40 @@ const app = express();
 
 // Core security middlewares (similar intent to Java EE security filters)
 app.use(helmet());
+
+// CORS configuration - always include Netlify URL
+const getCorsOrigins = () => {
+  const netlifyUrl = 'https://marthms.netlify.app';
+  const defaultOrigins = [
+    'http://localhost:3000',
+    'http://localhost:4000',
+    netlifyUrl,
+  ];
+
+  if (process.env.ALLOWED_ORIGINS) {
+    const envOrigins = process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim());
+    // Merge and deduplicate, ensuring Netlify URL is always included
+    const allOrigins = [...new Set([...envOrigins, ...defaultOrigins])];
+    return allOrigins;
+  }
+
+  return defaultOrigins;
+};
+
 app.use(
   cors({
-    origin: process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(',')
-      : [
-          'http://localhost:3000',
-          'http://localhost:4000',
-          'https://marthms.netlify.app',
-        ],
+    origin: getCorsOrigins(),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
     credentials: true,
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   }),
 );
 app.use(morgan('dev'));
