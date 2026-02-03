@@ -22,6 +22,10 @@ const passwordResetRoutes = require('./routes/password-reset.routes');
 
 const app = express();
 
+// Trust proxy - needed when behind reverse proxy (nginx, load balancer, etc.)
+// This allows req.secure and req.headers['x-forwarded-proto'] to work correctly
+app.set('trust proxy', 1);
+
 // Core security middlewares (similar intent to Java EE security filters)
 app.use(helmet());
 

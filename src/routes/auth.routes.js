@@ -33,16 +33,37 @@ if (!ACCESS_SECRET || !REFRESH_SECRET) {
  *   SameSite=Lax and secure=false so cookies still work.
  */
 function getCookieBaseOptions(req) {
+  // Check multiple ways to detect HTTPS (for different proxy configurations)
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const forwardedSsl = req.headers['x-forwarded-ssl'];
   const isSecure =
-    req.secure || req.headers['x-forwarded-proto'] === 'https';
+    req.secure ||
+    forwardedProto === 'https' ||
+    forwardedSsl === 'on' ||
+    req.headers['x-forwarded-proto']?.includes('https');
 
-  // Cross-site (Netlify → API) requires SameSite=None and Secure
-  const sameSite = isSecure ? 'none' : 'lax';
+  // In production (HTTPS), always use SameSite=None; Secure for cross-site cookies
+  // For localhost, use Lax
+  const isProduction = isSecure || process.env.NODE_ENV === 'production';
+  const sameSite = isProduction ? 'none' : 'lax';
+
+  // Debug logging (remove in production if too verbose)
+  if (process.env.DEBUG_COOKIES === 'true') {
+    console.log('Cookie options:', {
+      secure: isSecure,
+      sameSite,
+      forwardedProto,
+      reqSecure: req.secure,
+      nodeEnv: process.env.NODE_ENV,
+    });
+  }
 
   return {
     httpOnly: true,
-    secure: isSecure,
-    sameSite,
+    secure: isProduction, // Must be true for SameSite=None
+    sameSite: sameSite,
+    // Don't set domain - let browser handle it for cross-site cookies
+    // path: '/' is default, which is what we want
   };
 }
 
@@ -153,7 +174,28 @@ router.post('/refresh', async (req, res, next) => {
     const refreshTokenFromCookie = req.cookies?.hms_refresh;
     const token = refreshTokenFromCookie || refreshTokenFromBody;
 
+    // Debug logging for cookie issues
+    if (process.env.DEBUG_COOKIES === 'true') {
+      console.log('Refresh endpoint:', {
+        hasCookie: !!refreshTokenFromCookie,
+        hasBodyToken: !!refreshTokenFromBody,
+        cookies: Object.keys(req.cookies || {}),
+        origin: req.headers.origin,
+        referer: req.headers.referer,
+      });
+    }
+
     if (!token) {
+      // More detailed error for debugging
+      const errorMsg = refreshTokenFromCookie
+        ? 'Refresh token cookie exists but is invalid'
+        : 'Refresh token is required (no cookie or body token)';
+      if (process.env.DEBUG_COOKIES === 'true') {
+        console.log('Refresh failed:', errorMsg, {
+          cookies: req.cookies,
+          body: req.body,
+        });
+      }
       return res.status(400).json({ error: 'Refresh token is required' });
     }
 
@@ -221,6 +263,26 @@ router.get('/me', authenticateToken, (req, res) => {
     username: req.user.username,
     role: req.user.role,
     hostelId: req.user.hostelId ?? null,
+  });
+});
+
+// Debug endpoint to test cookie setting (remove in production)
+router.get('/test-cookies', (req, res) => {
+  const baseCookieOptions = getCookieBaseOptions(req);
+  res.cookie('test_cookie', 'test_value', {
+    ...baseCookieOptions,
+    maxAge: 1000 * 60, // 1 minute
+  });
+
+  return res.json({
+    message: 'Test cookie set',
+    receivedCookies: req.cookies,
+    cookieOptions: baseCookieOptions,
+    isSecure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+    headers: {
+      'x-forwarded-proto': req.headers['x-forwarded-proto'],
+      origin: req.headers.origin,
+    },
   });
 });
 
