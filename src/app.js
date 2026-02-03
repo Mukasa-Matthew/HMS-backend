@@ -68,6 +68,20 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
 
+// Debug middleware to log all incoming cookies (only if DEBUG_COOKIES is enabled)
+if (process.env.DEBUG_COOKIES === 'true') {
+  app.use((req, res, next) => {
+    if (req.cookies && Object.keys(req.cookies).length > 0) {
+      console.log('Incoming request cookies:', {
+        path: req.path,
+        cookies: Object.keys(req.cookies),
+        origin: req.headers.origin,
+      });
+    }
+    next();
+  });
+}
+
 // Initialize database connection pool on startup
 initDb()
   .then(() => {

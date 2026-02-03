@@ -24,11 +24,29 @@ function authenticateToken(req, res, next) {
   const token = extractToken(req);
 
   if (!token) {
+    // Enhanced logging for debugging cookie issues
+    if (process.env.DEBUG_COOKIES === 'true' || process.env.NODE_ENV !== 'production') {
+      console.log('Auth failed - No token found:', {
+        path: req.path,
+        method: req.method,
+        hasAuthHeader: !!req.headers.authorization,
+        hasCookies: !!req.cookies,
+        cookieKeys: req.cookies ? Object.keys(req.cookies) : [],
+        origin: req.headers.origin,
+        host: req.headers.host,
+      });
+    }
     return res.status(401).json({ error: 'Authentication token missing' });
   }
 
   jwt.verify(token, ACCESS_SECRET, (err, user) => {
     if (err) {
+      if (process.env.DEBUG_COOKIES === 'true') {
+        console.log('Token verification failed:', {
+          path: req.path,
+          error: err.message,
+        });
+      }
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
     req.user = user;

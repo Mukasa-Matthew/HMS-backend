@@ -183,13 +183,19 @@ router.post('/login', async (req, res, next) => {
       details: { username: user.username, role: user.role, hostelId: user.hostel_id || null },
     });
 
+    // Return user info and tokens (tokens also in cookies, but this is a fallback)
+    // Frontend should prefer cookies, but can use these if cookies fail
     return res.json({
       user: {
         id: user.id,
         username: user.username,
         role: user.role,
-          hostelId: user.hostel_id || null,
+        hostelId: user.hostel_id || null,
       },
+      // Temporary fallback: include tokens in response if cookies fail
+      // Frontend should check cookies first, then fall back to these
+      accessToken: accessToken,
+      refreshToken: refreshToken,
     });
   } catch (err) {
     return next(err);
@@ -294,22 +300,40 @@ router.get('/me', authenticateToken, (req, res) => {
   });
 });
 
-// Debug endpoint to test cookie setting (remove in production)
-router.get('/test-cookies', (req, res) => {
+// Comprehensive diagnostic endpoint
+router.get('/diagnostics', (req, res) => {
   const baseCookieOptions = getCookieBaseOptions(req);
-  res.cookie('test_cookie', 'test_value', {
+  
+  // Try to set a test cookie
+  res.cookie('test_cookie', 'test_value_' + Date.now(), {
     ...baseCookieOptions,
     maxAge: 1000 * 60, // 1 minute
   });
 
   return res.json({
-    message: 'Test cookie set',
-    receivedCookies: req.cookies,
+    message: 'Diagnostic information',
+    receivedCookies: req.cookies || {},
+    cookieKeys: req.cookies ? Object.keys(req.cookies) : [],
     cookieOptions: baseCookieOptions,
-    isSecure: req.secure || req.headers['x-forwarded-proto'] === 'https',
-    headers: {
-      'x-forwarded-proto': req.headers['x-forwarded-proto'],
+    requestInfo: {
+      host: req.headers.host,
       origin: req.headers.origin,
+      referer: req.headers.referer,
+      'user-agent': req.headers['user-agent'],
+      'x-forwarded-proto': req.headers['x-forwarded-proto'],
+      'x-forwarded-ssl': req.headers['x-forwarded-ssl'],
+    },
+    serverInfo: {
+      secure: req.secure,
+      nodeEnv: process.env.NODE_ENV,
+      hasAccessToken: !!req.cookies?.hms_access,
+      hasRefreshToken: !!req.cookies?.hms_refresh,
+    },
+    instructions: {
+      step1: 'Check if test_cookie appears in your browser DevTools → Application → Cookies',
+      step2: 'If test_cookie is NOT visible, cookies are being blocked',
+      step3: 'Check browser settings: Allow third-party cookies must be enabled',
+      step4: 'Check if SameSite=None and Secure flags are set correctly',
     },
   });
 });
