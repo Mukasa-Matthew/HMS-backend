@@ -5,6 +5,7 @@ const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
 const { createRegistrationEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
+const { createRegistrationMessage, sendSMSWithHistory } = require('../utils/sms.util');
 
 const router = express.Router();
 
@@ -160,16 +161,18 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, roomId },
       });
 
-      // Send email notification to student if email exists
+      // Send notification: Email first, SMS fallback if no email
       let emailResult = null;
+      let smsResult = null;
+      const hostelName = student.hostel_name || 'Hostel';
+      const studentName = student.full_name || 'Student';
+      const roomNumber = student.room_name || room.id.toString();
+      const amountPaid = 0; // No payment yet
+      const amountLeft = pricePerStudent;
+
+      // Try email first if student has email
       if (student.email) {
         try {
-          const hostelName = student.hostel_name || 'Hostel';
-          const studentName = student.full_name || 'Student';
-          const roomNumber = student.room_name || room.id.toString();
-          const amountPaid = 0; // No payment yet
-          const amountLeft = pricePerStudent;
-
           const html = createRegistrationEmailHTML(
             hostelName,
             studentName,
@@ -189,6 +192,47 @@ router.post(
         } catch (emailError) {
           // Log error but don't fail the allocation
           console.error('Failed to send registration email:', emailError);
+          // Fallback to SMS if email fails and phone exists
+          if (student.phone) {
+            try {
+              const message = createRegistrationMessage(
+                hostelName,
+                studentName,
+                roomNumber,
+                amountPaid,
+                amountLeft
+              );
+              smsResult = await sendSMSWithHistory({
+                studentId: studentId,
+                phone: student.phone,
+                messageType: 'REGISTRATION',
+                message: message,
+                sentByUserId: req.user.sub,
+              });
+            } catch (smsError) {
+              console.error('Failed to send registration SMS fallback:', smsError);
+            }
+          }
+        }
+      } else if (student.phone) {
+        // No email, try SMS
+        try {
+          const message = createRegistrationMessage(
+            hostelName,
+            studentName,
+            roomNumber,
+            amountPaid,
+            amountLeft
+          );
+          smsResult = await sendSMSWithHistory({
+            studentId: studentId,
+            phone: student.phone,
+            messageType: 'REGISTRATION',
+            message: message,
+            sentByUserId: req.user.sub,
+          });
+        } catch (smsError) {
+          console.error('Failed to send registration SMS:', smsError);
         }
       }
 
@@ -200,6 +244,8 @@ router.post(
         pricePerStudent: pricePerStudent,
         emailSent: emailResult?.success || false,
         emailHistoryId: emailResult?.emailHistoryId || null,
+        smsSent: smsResult?.success || false,
+        smsHistoryId: smsResult?.smsHistoryId || null,
       });
     } catch (err) {
       return next(err);
@@ -298,13 +344,14 @@ router.post(
       const totalPaid = Number(totalRows[0].total_paid || 0);
       const balance = totalRequired - totalPaid;
 
-      // Send updated email to student if email exists
+      // Send updated notification: Email first, SMS fallback if no email
       let emailResult = null;
+      let smsResult = null;
       try {
-        // Get student and allocation details for email
+        // Get student and allocation details
         const [studentAllocRows] = await db.execute(
           `SELECT 
-            s.id AS student_id, s.full_name, s.email,
+            s.id AS student_id, s.full_name, s.email, s.phone,
             h.name AS hostel_name, r.name AS room_name
            FROM allocations a
            JOIN students s ON a.student_id = s.id
@@ -314,32 +361,80 @@ router.post(
           [allocationId]
         );
 
-        if (studentAllocRows.length > 0 && studentAllocRows[0].email) {
+        if (studentAllocRows.length > 0) {
           const student = studentAllocRows[0];
           const hostelName = student.hostel_name || 'Hostel';
           const studentName = student.full_name || 'Student';
           const roomNumber = student.room_name || 'N/A';
 
-          const html = createRegistrationEmailHTML(
-            hostelName,
-            studentName,
-            roomNumber,
-            totalPaid,
-            balance
-          );
+          // Try email first if student has email
+          if (student.email) {
+            try {
+              const html = createRegistrationEmailHTML(
+                hostelName,
+                studentName,
+                roomNumber,
+                totalPaid,
+                balance
+              );
 
-          emailResult = await sendEmailWithHistory({
-            studentId: student.student_id,
-            email: student.email,
-            messageType: 'REGISTRATION',
-            subject: `${hostelName} - Payment Update`,
-            html: html,
-            sentByUserId: req.user.sub,
-          });
+              emailResult = await sendEmailWithHistory({
+                studentId: student.student_id,
+                email: student.email,
+                messageType: 'REGISTRATION',
+                subject: `${hostelName} - Payment Update`,
+                html: html,
+                sentByUserId: req.user.sub,
+              });
+            } catch (emailError) {
+              console.error('Failed to send payment update email:', emailError);
+              // Fallback to SMS if email fails and phone exists
+              if (student.phone) {
+                try {
+                  const message = createRegistrationMessage(
+                    hostelName,
+                    studentName,
+                    roomNumber,
+                    totalPaid,
+                    balance
+                  );
+                  smsResult = await sendSMSWithHistory({
+                    studentId: student.student_id,
+                    phone: student.phone,
+                    messageType: 'REGISTRATION',
+                    message: message,
+                    sentByUserId: req.user.sub,
+                  });
+                } catch (smsError) {
+                  console.error('Failed to send payment update SMS fallback:', smsError);
+                }
+              }
+            }
+          } else if (student.phone) {
+            // No email, try SMS
+            try {
+              const message = createRegistrationMessage(
+                hostelName,
+                studentName,
+                roomNumber,
+                totalPaid,
+                balance
+              );
+              smsResult = await sendSMSWithHistory({
+                studentId: student.student_id,
+                phone: student.phone,
+                messageType: 'REGISTRATION',
+                message: message,
+                sentByUserId: req.user.sub,
+              });
+            } catch (smsError) {
+              console.error('Failed to send payment update SMS:', smsError);
+            }
+          }
         }
-      } catch (emailError) {
+      } catch (error) {
         // Log error but don't fail the payment
-        console.error('Failed to send payment update email:', emailError);
+        console.error('Failed to send payment update notification:', error);
       }
 
       return res.status(201).json({
@@ -348,6 +443,10 @@ router.post(
         totalRequired,
         totalPaid,
         balance,
+        emailSent: emailResult?.success || false,
+        emailHistoryId: emailResult?.emailHistoryId || null,
+        smsSent: smsResult?.success || false,
+        smsHistoryId: smsResult?.smsHistoryId || null,
       });
     } catch (err) {
       return next(err);

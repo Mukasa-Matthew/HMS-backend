@@ -5,6 +5,7 @@ const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
 const { createCheckInEmailHTML, createCheckOutEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
+const { createCheckInMessage, createCheckOutMessage, sendSMSWithHistory } = require('../utils/sms.util');
 
 const router = express.Router();
 
@@ -154,13 +155,15 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, semesterId: student.semester_id },
       });
 
-      // Send welcome email to student if email exists
+      // Send welcome notification: Email first, SMS fallback if no email
       let emailResult = null;
+      let smsResult = null;
+      const hostelName = student.hostel_name || 'Hostel';
+      const studentName = student.full_name || 'Student';
+
+      // Try email first if student has email
       if (student.email) {
         try {
-          const hostelName = student.hostel_name || 'Hostel';
-          const studentName = student.full_name || 'Student';
-
           const html = createCheckInEmailHTML(hostelName, studentName);
 
           emailResult = await sendEmailWithHistory({
@@ -172,8 +175,36 @@ router.post(
             sentByUserId: req.user.sub,
           });
         } catch (emailError) {
-          // Log error but don't fail the check-in
           console.error('Failed to send check-in email:', emailError);
+          // Fallback to SMS if email fails and phone exists
+          if (student.phone) {
+            try {
+              const message = createCheckInMessage(hostelName, studentName);
+              smsResult = await sendSMSWithHistory({
+                studentId: studentId,
+                phone: student.phone,
+                messageType: 'CHECK_IN',
+                message: message,
+                sentByUserId: req.user.sub,
+              });
+            } catch (smsError) {
+              console.error('Failed to send check-in SMS fallback:', smsError);
+            }
+          }
+        }
+      } else if (student.phone) {
+        // No email, try SMS
+        try {
+          const message = createCheckInMessage(hostelName, studentName);
+          smsResult = await sendSMSWithHistory({
+            studentId: studentId,
+            phone: student.phone,
+            messageType: 'CHECK_IN',
+            message: message,
+            sentByUserId: req.user.sub,
+          });
+        } catch (smsError) {
+          console.error('Failed to send check-in SMS:', smsError);
         }
       }
 
@@ -182,6 +213,8 @@ router.post(
         checkInId: result.insertId,
         emailSent: emailResult?.success || false,
         emailHistoryId: emailResult?.emailHistoryId || null,
+        smsSent: smsResult?.success || false,
+        smsHistoryId: smsResult?.smsHistoryId || null,
       });
     } catch (err) {
       return next(err);
@@ -264,13 +297,15 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, semesterId: student.semester_id },
       });
 
-      // Send check-out email to student if email exists
+      // Send check-out notification: Email first, SMS fallback if no email
       let emailResult = null;
+      let smsResult = null;
+      const hostelName = student.hostel_name || 'Hostel';
+      const studentName = student.full_name || 'Student';
+
+      // Try email first if student has email
       if (student.email) {
         try {
-          const hostelName = student.hostel_name || 'Hostel';
-          const studentName = student.full_name || 'Student';
-
           const html = createCheckOutEmailHTML(hostelName, studentName);
 
           emailResult = await sendEmailWithHistory({
@@ -282,8 +317,36 @@ router.post(
             sentByUserId: req.user.sub,
           });
         } catch (emailError) {
-          // Log error but don't fail the check-out
           console.error('Failed to send check-out email:', emailError);
+          // Fallback to SMS if email fails and phone exists
+          if (student.phone) {
+            try {
+              const message = createCheckOutMessage(hostelName, studentName);
+              smsResult = await sendSMSWithHistory({
+                studentId: studentId,
+                phone: student.phone,
+                messageType: 'CHECK_OUT',
+                message: message,
+                sentByUserId: req.user.sub,
+              });
+            } catch (smsError) {
+              console.error('Failed to send check-out SMS fallback:', smsError);
+            }
+          }
+        }
+      } else if (student.phone) {
+        // No email, try SMS
+        try {
+          const message = createCheckOutMessage(hostelName, studentName);
+          smsResult = await sendSMSWithHistory({
+            studentId: studentId,
+            phone: student.phone,
+            messageType: 'CHECK_OUT',
+            message: message,
+            sentByUserId: req.user.sub,
+          });
+        } catch (smsError) {
+          console.error('Failed to send check-out SMS:', smsError);
         }
       }
 
@@ -291,6 +354,8 @@ router.post(
         message: 'Student checked out successfully',
         emailSent: emailResult?.success || false,
         emailHistoryId: emailResult?.emailHistoryId || null,
+        smsSent: smsResult?.success || false,
+        smsHistoryId: smsResult?.smsHistoryId || null,
       });
     } catch (err) {
       return next(err);

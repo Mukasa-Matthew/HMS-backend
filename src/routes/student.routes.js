@@ -4,6 +4,7 @@ const Joi = require('joi');
 const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
+const { canOwnerViewPaymentAmounts } = require('../utils/feature-settings.util');
 
 const router = express.Router();
 
@@ -339,6 +340,16 @@ router.get(
         }
       }
 
+      // Check if Hostel Owner can view payment amounts
+      let canViewPayments = true;
+      if (req.user.role === 'HOSTEL_OWNER' && effectiveHostelId) {
+        canViewPayments = await canOwnerViewPaymentAmounts(effectiveHostelId);
+      }
+      // Super Admin and Custodians always can view payments
+      if (req.user.role === 'SUPER_ADMIN' || req.user.role === 'CUSTODIAN') {
+        canViewPayments = true;
+      }
+
       // Combine data
       const result = students.map((student) => {
         const allocation = allocations.find((a) => a.student_id === student.id);
@@ -353,7 +364,7 @@ router.get(
           totalPaid = allocationPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
         }
 
-        return {
+        const studentData = {
           id: student.id,
           hostel_id: student.hostel_id,
           full_name: student.full_name,
@@ -370,12 +381,21 @@ router.get(
             room_price_at_allocation: allocation.room_price_at_allocation,
             allocated_at: allocation.allocated_at,
           } : null,
-          paymentSummary: {
+        };
+
+        // Only include payment summary if user can view payments
+        if (canViewPayments) {
+          studentData.paymentSummary = {
             totalPaid,
             totalRequired,
             balance: totalRequired - totalPaid,
-          },
-        };
+          };
+        } else {
+          // Hide payment information for Hostel Owners when setting is disabled
+          studentData.paymentSummary = null;
+        }
+
+        return studentData;
       });
 
       return res.json(result);

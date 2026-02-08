@@ -16,6 +16,7 @@ const VALID_FEATURES = [
   'semesters',
   'receipts',
   'dashboard_quick_actions', // Quick action buttons on dashboard
+  'owner_view_payment_amounts', // Allow Hostel Owners to see payment amounts for students
 ];
 
 const updateFeatureSettingsSchema = Joi.object({
