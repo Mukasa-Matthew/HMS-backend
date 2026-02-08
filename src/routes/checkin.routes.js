@@ -4,7 +4,7 @@ const Joi = require('joi');
 const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
-const { createCheckInMessage, createCheckOutMessage, sendSMSWithHistory } = require('../utils/sms.util');
+const { createCheckInEmailHTML, createCheckOutEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
 
 const router = express.Router();
 
@@ -154,33 +154,34 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, semesterId: student.semester_id },
       });
 
-      // Send welcome SMS to student if phone number exists
-      let smsResult = null;
-      if (student.phone) {
+      // Send welcome email to student if email exists
+      let emailResult = null;
+      if (student.email) {
         try {
           const hostelName = student.hostel_name || 'Hostel';
           const studentName = student.full_name || 'Student';
 
-          const message = createCheckInMessage(hostelName, studentName);
+          const html = createCheckInEmailHTML(hostelName, studentName);
 
-          smsResult = await sendSMSWithHistory({
+          emailResult = await sendEmailWithHistory({
             studentId: studentId,
-            phone: student.phone,
+            email: student.email,
             messageType: 'CHECK_IN',
-            message: message,
+            subject: `Welcome to ${hostelName} - Check In Confirmation`,
+            html: html,
             sentByUserId: req.user.sub,
           });
-        } catch (smsError) {
+        } catch (emailError) {
           // Log error but don't fail the check-in
-          console.error('Failed to send check-in SMS:', smsError);
+          console.error('Failed to send check-in email:', emailError);
         }
       }
 
       return res.status(201).json({ 
         message: 'Student checked in successfully',
         checkInId: result.insertId,
-        smsSent: smsResult?.success || false,
-        smsHistoryId: smsResult?.smsHistoryId || null,
+        emailSent: emailResult?.success || false,
+        emailHistoryId: emailResult?.emailHistoryId || null,
       });
     } catch (err) {
       return next(err);
@@ -218,7 +219,7 @@ router.post(
 
       // Verify student exists and belongs to this hostel, get student and hostel details
       const [studentRows] = await db.execute(
-        `SELECT s.id, s.hostel_id, s.semester_id, s.full_name, s.phone, h.name AS hostel_name
+        `SELECT s.id, s.hostel_id, s.semester_id, s.full_name, s.phone, s.email, h.name AS hostel_name
          FROM students s
          LEFT JOIN hostels h ON s.hostel_id = h.id
          WHERE s.id = ? LIMIT 1`,
@@ -263,32 +264,33 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, semesterId: student.semester_id },
       });
 
-      // Send check-out SMS to student if phone number exists
-      let smsResult = null;
-      if (student.phone) {
+      // Send check-out email to student if email exists
+      let emailResult = null;
+      if (student.email) {
         try {
           const hostelName = student.hostel_name || 'Hostel';
           const studentName = student.full_name || 'Student';
 
-          const message = createCheckOutMessage(hostelName, studentName);
+          const html = createCheckOutEmailHTML(hostelName, studentName);
 
-          smsResult = await sendSMSWithHistory({
+          emailResult = await sendEmailWithHistory({
             studentId: studentId,
-            phone: student.phone,
+            email: student.email,
             messageType: 'CHECK_OUT',
-            message: message,
+            subject: `Thank You - ${hostelName} Check Out`,
+            html: html,
             sentByUserId: req.user.sub,
           });
-        } catch (smsError) {
+        } catch (emailError) {
           // Log error but don't fail the check-out
-          console.error('Failed to send check-out SMS:', smsError);
+          console.error('Failed to send check-out email:', emailError);
         }
       }
 
       return res.json({ 
         message: 'Student checked out successfully',
-        smsSent: smsResult?.success || false,
-        smsHistoryId: smsResult?.smsHistoryId || null,
+        emailSent: emailResult?.success || false,
+        emailHistoryId: emailResult?.emailHistoryId || null,
       });
     } catch (err) {
       return next(err);

@@ -1,7 +1,7 @@
 const express = require('express');
 const { getDb } = require('../config/db');
 const { hashPassword, comparePassword } = require('../utils/password.util');
-const { sendOTP, formatPhoneNumber } = require('../services/sms.service');
+const { sendOTP } = require('../services/email.service');
 const crypto = require('crypto');
 
 const router = express.Router();
@@ -11,9 +11,9 @@ const rateLimitStore = new Map();
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const MAX_REQUESTS_PER_HOUR = 3;
 
-function checkRateLimit(phone) {
+function checkRateLimit(email) {
   const now = Date.now();
-  const key = phone;
+  const key = email;
   
   if (rateLimitStore.has(key)) {
     const requests = rateLimitStore.get(key);
@@ -53,24 +53,24 @@ function generateOTP() {
 
 /**
  * POST /api/password-reset/request
- * Request password reset OTP
+ * Request password reset OTP via email
  */
 router.post('/request', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { email } = req.body;
 
-    if (!phone) {
-      return res.status(400).json({ error: 'Phone number is required' });
+    if (!email) {
+      return res.status(400).json({ error: 'Email address is required' });
     }
 
-    // Format phone number
-    const formattedPhone = formatPhoneNumber(phone);
-    if (!formattedPhone) {
-      return res.status(400).json({ error: 'Invalid phone number format' });
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
     }
 
     // Check rate limit
-    if (!checkRateLimit(formattedPhone)) {
+    if (!checkRateLimit(email.toLowerCase())) {
       return res.status(429).json({ 
         error: 'Too many requests. Please wait before requesting another OTP.' 
       });
@@ -78,17 +78,18 @@ router.post('/request', async (req, res) => {
 
     const pool = getDb();
 
-    // Check if user exists with this phone number
+    // Check if user exists with this email (username can be email or we check email field if it exists)
+    // First check if username is the email
     const [users] = await pool.query(
-      'SELECT id, username, phone FROM users WHERE phone = ? AND is_active = 1',
-      [formattedPhone]
+      'SELECT id, username FROM users WHERE (username = ? OR email = ?) AND is_active = 1',
+      [email.toLowerCase(), email.toLowerCase()]
     );
 
     if (users.length === 0) {
-      // Don't reveal if phone exists or not for security
-      // But still return success to prevent phone enumeration
+      // Don't reveal if email exists or not for security
+      // But still return success to prevent email enumeration
       return res.status(200).json({ 
-        message: 'If this phone number is registered, an OTP has been sent.' 
+        message: 'If this email is registered, an OTP has been sent.' 
       });
     }
 
@@ -97,33 +98,33 @@ router.post('/request', async (req, res) => {
     const otpHash = await hashPassword(otp);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Invalidate any previous unused OTPs for this phone
+    // Invalidate any previous unused OTPs for this email
     await pool.query(
       'UPDATE password_resets SET used = 1 WHERE phone = ? AND used = 0',
-      [formattedPhone]
+      [email.toLowerCase()]
     );
 
-    // Store OTP
+    // Store OTP (using phone column to store email for backward compatibility)
     await pool.query(
       `INSERT INTO password_resets (phone, otp_hash, expires_at, used)
        VALUES (?, ?, ?, 0)`,
-      [formattedPhone, otpHash, expiresAt]
+      [email.toLowerCase(), otpHash, expiresAt]
     );
 
-    // Send OTP via SMS
+    // Send OTP via Email
     try {
-      await sendOTP(formattedPhone, otp);
-    } catch (smsError) {
-      console.error('Failed to send OTP SMS:', smsError);
-      // Still return success to prevent phone enumeration
+      await sendOTP(email.toLowerCase(), otp);
+    } catch (emailError) {
+      console.error('Failed to send OTP email:', emailError);
+      // Still return success to prevent email enumeration
       // In production, you might want to log this for monitoring
       return res.status(200).json({ 
-        message: 'If this phone number is registered, an OTP has been sent.' 
+        message: 'If this email is registered, an OTP has been sent.' 
       });
     }
 
     res.status(200).json({ 
-      message: 'If this phone number is registered, an OTP has been sent.' 
+      message: 'If this email is registered, an OTP has been sent.' 
     });
   } catch (error) {
     console.error('Password reset request error:', error);
@@ -137,15 +138,16 @@ router.post('/request', async (req, res) => {
  */
 router.post('/verify', async (req, res) => {
   try {
-    const { phone, otp } = req.body;
+    const { email, otp } = req.body;
 
-    if (!phone || !otp) {
-      return res.status(400).json({ error: 'Phone number and OTP are required' });
+    if (!email || !otp) {
+      return res.status(400).json({ error: 'Email address and OTP are required' });
     }
 
-    const formattedPhone = formatPhoneNumber(phone);
-    if (!formattedPhone) {
-      return res.status(400).json({ error: 'Invalid phone number format' });
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
     }
 
     if (!/^\d{6}$/.test(otp)) {
@@ -161,7 +163,7 @@ router.post('/verify', async (req, res) => {
        WHERE phone = ? AND used = 0 AND expires_at > NOW()
        ORDER BY created_at DESC 
        LIMIT 1`,
-      [formattedPhone]
+      [email.toLowerCase()]
     );
 
     if (resets.length === 0) {
@@ -207,7 +209,7 @@ router.post('/verify', async (req, res) => {
     await pool.query(
       `INSERT INTO password_resets (phone, otp_hash, expires_at, used)
        VALUES (?, ?, ?, 0)`,
-      [formattedPhone, await hashPassword(sessionToken), sessionExpiresAt]
+      [email.toLowerCase(), await hashPassword(sessionToken), sessionExpiresAt]
     );
 
     res.status(200).json({ 
@@ -227,15 +229,16 @@ router.post('/verify', async (req, res) => {
  */
 router.post('/reset', async (req, res) => {
   try {
-    const { phone, resetToken, newPassword } = req.body;
+    const { email, resetToken, newPassword } = req.body;
 
-    if (!phone || !resetToken || !newPassword) {
-      return res.status(400).json({ error: 'Phone number, reset token, and new password are required' });
+    if (!email || !resetToken || !newPassword) {
+      return res.status(400).json({ error: 'Email address, reset token, and new password are required' });
     }
 
-    const formattedPhone = formatPhoneNumber(phone);
-    if (!formattedPhone) {
-      return res.status(400).json({ error: 'Invalid phone number format' });
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
     }
 
     // Validate password strength
@@ -252,7 +255,7 @@ router.post('/reset', async (req, res) => {
        WHERE phone = ? AND used = 0 AND expires_at > NOW()
        ORDER BY created_at DESC 
        LIMIT 1`,
-      [formattedPhone]
+      [email.toLowerCase()]
     );
 
     if (resets.length === 0) {
@@ -267,10 +270,10 @@ router.post('/reset', async (req, res) => {
       return res.status(400).json({ error: 'Invalid reset token' });
     }
 
-    // Find user by phone
+    // Find user by email (username can be email or we check email field if it exists)
     const [users] = await pool.query(
-      'SELECT id FROM users WHERE phone = ? AND is_active = 1',
-      [formattedPhone]
+      'SELECT id FROM users WHERE (username = ? OR email = ?) AND is_active = 1',
+      [email.toLowerCase(), email.toLowerCase()]
     );
 
     if (users.length === 0) {
@@ -297,7 +300,7 @@ router.post('/reset', async (req, res) => {
     // Invalidate all other reset tokens for this user
     await pool.query(
       'UPDATE password_resets SET used = 1 WHERE phone = ? AND used = 0',
-      [formattedPhone]
+      [email.toLowerCase()]
     );
 
     res.status(200).json({ 

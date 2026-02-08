@@ -2,8 +2,10 @@
 node_modules/
 package-lock.json
 
-# Environment variables (optional - user wants .env included, but we'll add it anyway)
-# .env
+# Environment variables - NEVER commit .env files with secrets!
+.env
+.env.local
+.env.*.local
 
 # Logs
 logs

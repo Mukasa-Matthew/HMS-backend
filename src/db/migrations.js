@@ -203,6 +203,7 @@ async function runMigrations(pool) {
 
   // Ensure hostel_id columns exist when upgrading older DBs (without adding FKs to avoid migration failures)
   await addColumnIfMissing('users', 'hostel_id INT NULL', 'hostel_id');
+  await addColumnIfMissing('users', 'email VARCHAR(100)', 'email');
   await addColumnIfMissing('rooms', 'hostel_id INT NULL', 'hostel_id');
   await addColumnIfMissing('students', 'hostel_id INT NULL', 'hostel_id');
   await addColumnIfMissing('allocations', 'hostel_id INT NULL', 'hostel_id');

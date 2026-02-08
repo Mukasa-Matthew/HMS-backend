@@ -4,7 +4,7 @@ const Joi = require('joi');
 const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
-const { createRegistrationMessage, sendSMSWithHistory } = require('../utils/sms.util');
+const { createRegistrationEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
 
 const router = express.Router();
 
@@ -59,7 +59,7 @@ router.post(
 
       // Ensure student belongs to this hostel and get student details
       const [studentRows] = await db.execute(
-        `SELECT s.id, s.hostel_id, s.semester_id, s.full_name, s.phone, h.name AS hostel_name, r.name AS room_name
+        `SELECT s.id, s.hostel_id, s.semester_id, s.full_name, s.phone, s.email, h.name AS hostel_name, r.name AS room_name
          FROM students s
          LEFT JOIN hostels h ON s.hostel_id = h.id
          LEFT JOIN rooms r ON r.id = ?
@@ -160,9 +160,9 @@ router.post(
         details: { hostelId: effectiveHostelId, studentId, roomId },
       });
 
-      // Send SMS notification to student if phone number exists
-      let smsResult = null;
-      if (student.phone) {
+      // Send email notification to student if email exists
+      let emailResult = null;
+      if (student.email) {
         try {
           const hostelName = student.hostel_name || 'Hostel';
           const studentName = student.full_name || 'Student';
@@ -170,7 +170,7 @@ router.post(
           const amountPaid = 0; // No payment yet
           const amountLeft = pricePerStudent;
 
-          const message = createRegistrationMessage(
+          const html = createRegistrationEmailHTML(
             hostelName,
             studentName,
             roomNumber,
@@ -178,16 +178,17 @@ router.post(
             amountLeft
           );
 
-          smsResult = await sendSMSWithHistory({
+          emailResult = await sendEmailWithHistory({
             studentId: studentId,
-            phone: student.phone,
+            email: student.email,
             messageType: 'REGISTRATION',
-            message: message,
+            subject: `Welcome to ${hostelName} - Room Allocation`,
+            html: html,
             sentByUserId: req.user.sub,
           });
-        } catch (smsError) {
+        } catch (emailError) {
           // Log error but don't fail the allocation
-          console.error('Failed to send registration SMS:', smsError);
+          console.error('Failed to send registration email:', emailError);
         }
       }
 
@@ -197,8 +198,8 @@ router.post(
         totalRequired: pricePerStudent,
         roomCapacity: roomCapacity,
         pricePerStudent: pricePerStudent,
-        smsSent: smsResult?.success || false,
-        smsHistoryId: smsResult?.smsHistoryId || null,
+        emailSent: emailResult?.success || false,
+        emailHistoryId: emailResult?.emailHistoryId || null,
       });
     } catch (err) {
       return next(err);
@@ -297,13 +298,13 @@ router.post(
       const totalPaid = Number(totalRows[0].total_paid || 0);
       const balance = totalRequired - totalPaid;
 
-      // Send updated SMS to student if phone number exists
-      let smsResult = null;
+      // Send updated email to student if email exists
+      let emailResult = null;
       try {
-        // Get student and allocation details for SMS
+        // Get student and allocation details for email
         const [studentAllocRows] = await db.execute(
           `SELECT 
-            s.id AS student_id, s.full_name, s.phone,
+            s.id AS student_id, s.full_name, s.email,
             h.name AS hostel_name, r.name AS room_name
            FROM allocations a
            JOIN students s ON a.student_id = s.id
@@ -313,13 +314,13 @@ router.post(
           [allocationId]
         );
 
-        if (studentAllocRows.length > 0 && studentAllocRows[0].phone) {
+        if (studentAllocRows.length > 0 && studentAllocRows[0].email) {
           const student = studentAllocRows[0];
           const hostelName = student.hostel_name || 'Hostel';
           const studentName = student.full_name || 'Student';
           const roomNumber = student.room_name || 'N/A';
 
-          const message = createRegistrationMessage(
+          const html = createRegistrationEmailHTML(
             hostelName,
             studentName,
             roomNumber,
@@ -327,17 +328,18 @@ router.post(
             balance
           );
 
-          smsResult = await sendSMSWithHistory({
+          emailResult = await sendEmailWithHistory({
             studentId: student.student_id,
-            phone: student.phone,
+            email: student.email,
             messageType: 'REGISTRATION',
-            message: message,
+            subject: `${hostelName} - Payment Update`,
+            html: html,
             sentByUserId: req.user.sub,
           });
         }
-      } catch (smsError) {
+      } catch (emailError) {
         // Log error but don't fail the payment
-        console.error('Failed to send payment update SMS:', smsError);
+        console.error('Failed to send payment update email:', emailError);
       }
 
       return res.status(201).json({
