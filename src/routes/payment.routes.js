@@ -7,6 +7,7 @@ const { writeAuditLog } = require('../utils/audit.util');
 const { createRegistrationEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
 const { createRegistrationMessage, sendSMSWithHistory } = require('../utils/sms.util');
 const { isCustodianPriceMarkupEnabled } = require('../utils/feature-settings.util');
+const { getReceiptData, createReceiptHTML, createSMSReceipt } = require('../utils/receipt.util');
 
 const router = express.Router();
 
@@ -368,10 +369,11 @@ router.post(
       }
 
       // Insert payment (recorded after money is received externally)
-      await db.execute(
+      const [paymentResult] = await db.execute(
         'INSERT INTO payments (allocation_id, semester_id, amount, recorded_by_user_id) VALUES (?, ?, ?, ?)',
         [allocationId, allocation.semester_id, amount, req.user.sub],
       );
+      const paymentId = paymentResult.insertId;
 
       await writeAuditLog(db, req, {
         action: 'PAYMENT_RECORDED',
@@ -392,108 +394,86 @@ router.post(
       const displayTotalRequired = displayPrice || actualPrice;
       const displayBalance = displayTotalRequired - displayTotalPaid;
 
-      // Send updated notification: Email first, SMS fallback if no email
+      // Send receipt: Email first, SMS fallback if no email
       let emailResult = null;
       let smsResult = null;
       try {
-        // Get student and allocation details
-        const [studentAllocRows] = await db.execute(
-          `SELECT 
-            s.id AS student_id, s.full_name, s.email, s.phone,
-            h.name AS hostel_name, r.name AS room_name
-           FROM allocations a
-           JOIN students s ON a.student_id = s.id
-           LEFT JOIN hostels h ON s.hostel_id = h.id
-           LEFT JOIN rooms r ON a.room_id = r.id
+        // Get receipt data
+        const receiptData = await getReceiptData(paymentId, req.user.role, allocation.hostel_id);
+        
+        // Get student details for sending
+        const [studentRows] = await db.execute(
+          `SELECT s.id AS student_id, s.email, s.phone
+           FROM students s
+           JOIN allocations a ON s.id = a.student_id
            WHERE a.id = ? LIMIT 1`,
           [allocationId]
         );
 
-        if (studentAllocRows.length > 0) {
-          const student = studentAllocRows[0];
-          const hostelName = student.hostel_name || 'Hostel';
-          const studentName = student.full_name || 'Student';
-          const roomNumber = student.room_name || 'N/A';
+        if (studentRows.length > 0) {
+          const student = studentRows[0];
 
           // Try email first if student has email
           if (student.email) {
             try {
-              // Use display amounts for student notifications
-              const html = createRegistrationEmailHTML(
-                hostelName,
-                studentName,
-                roomNumber,
-                displayTotalPaid,
-                displayBalance
-              );
+              // Create receipt HTML
+              const receiptHTML = createReceiptHTML(receiptData);
 
               emailResult = await sendEmailWithHistory({
                 studentId: student.student_id,
                 email: student.email,
-                messageType: 'REGISTRATION',
-                subject: `${hostelName} - Payment Update`,
-                html: html,
+                messageType: 'RECEIPT',
+                subject: `Payment Receipt - ${receiptData.receiptNumber} - ${receiptData.hostelName}`,
+                html: receiptHTML,
                 sentByUserId: req.user.sub,
               });
             } catch (emailError) {
-              console.error('Failed to send payment update email:', emailError);
+              console.error('Failed to send receipt email:', emailError);
               // Fallback to SMS if email fails and phone exists
               if (student.phone) {
                 try {
-                  // Use display amounts for student notifications
-                  const message = createRegistrationMessage(
-                    hostelName,
-                    studentName,
-                    roomNumber,
-                    displayTotalPaid,
-                    displayBalance
-                  );
+                  const smsReceipt = createSMSReceipt(receiptData);
                   smsResult = await sendSMSWithHistory({
                     studentId: student.student_id,
                     phone: student.phone,
-                    messageType: 'REGISTRATION',
-                    message: message,
+                    messageType: 'RECEIPT',
+                    message: smsReceipt,
                     sentByUserId: req.user.sub,
                   });
                 } catch (smsError) {
-                  console.error('Failed to send payment update SMS fallback:', smsError);
+                  console.error('Failed to send receipt SMS fallback:', smsError);
                 }
               }
             }
           } else if (student.phone) {
-            // No email, try SMS
+            // No email, send SMS receipt
             try {
-              // Use display amounts for student notifications
-              const message = createRegistrationMessage(
-                hostelName,
-                studentName,
-                roomNumber,
-                displayTotalPaid,
-                displayBalance
-              );
+              const smsReceipt = createSMSReceipt(receiptData);
               smsResult = await sendSMSWithHistory({
                 studentId: student.student_id,
                 phone: student.phone,
-                messageType: 'REGISTRATION',
-                message: message,
+                messageType: 'RECEIPT',
+                message: smsReceipt,
                 sentByUserId: req.user.sub,
               });
             } catch (smsError) {
-              console.error('Failed to send payment update SMS:', smsError);
+              console.error('Failed to send receipt SMS:', smsError);
             }
           }
         }
       } catch (error) {
         // Log error but don't fail the payment
-        console.error('Failed to send payment update notification:', error);
+        console.error('Failed to send receipt:', error);
       }
 
       return res.status(201).json({
         message: 'Payment recorded',
         allocationId,
+        paymentId,
         totalRequired,
         totalPaid,
         balance,
+        receiptSent: emailResult?.success || smsResult?.success || false,
         emailSent: emailResult?.success || false,
         emailHistoryId: emailResult?.emailHistoryId || null,
         smsSent: smsResult?.success || false,
