@@ -4,7 +4,7 @@ const Joi = require('joi');
 const { getDb } = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth.middleware');
 const { writeAuditLog } = require('../utils/audit.util');
-const { canOwnerViewPaymentAmounts } = require('../utils/feature-settings.util');
+const { canOwnerViewPaymentAmounts, isCustodianPriceMarkupEnabled } = require('../utils/feature-settings.util');
 
 const router = express.Router();
 
@@ -243,7 +243,7 @@ router.get(
           if (activeSemesterId) {
             [allocations] = await db.execute(
               `SELECT a.id, a.hostel_id, a.semester_id, a.student_id, a.room_id, a.room_price_at_allocation,
-                      a.allocated_at
+                      a.display_price_at_allocation, a.allocated_at
                FROM allocations a
                WHERE a.hostel_id = ? AND a.semester_id = ?`,
               [hostelId, activeSemesterId]
@@ -255,7 +255,7 @@ router.get(
           if (activeSemesterId) {
             [allocations] = await db.execute(
               `SELECT a.id, a.hostel_id, a.semester_id, a.student_id, a.room_id, a.room_price_at_allocation,
-                      a.allocated_at
+                      a.display_price_at_allocation, a.allocated_at
                FROM allocations a
                WHERE a.semester_id = ?`,
               [activeSemesterId]
@@ -268,7 +268,7 @@ router.get(
         if (activeSemesterId) {
           [allocations] = await db.execute(
             `SELECT a.id, a.hostel_id, a.semester_id, a.student_id, a.room_id, a.room_price_at_allocation,
-                    a.allocated_at
+                    a.display_price_at_allocation, a.allocated_at
              FROM allocations a
              WHERE a.hostel_id = ? AND a.semester_id = ?`,
             [effectiveHostelId, activeSemesterId]
@@ -350,18 +350,59 @@ router.get(
         canViewPayments = true;
       }
 
+      // Check if custodian price markup is enabled (for custodians to see display prices)
+      const markupEnabled = effectiveHostelId ? await isCustodianPriceMarkupEnabled(effectiveHostelId) : false;
+      const isCustodian = req.user.role === 'CUSTODIAN';
+
       // Combine data
       const result = students.map((student) => {
         const allocation = allocations.find((a) => a.student_id === student.id);
         const room = allocation ? rooms.find((r) => r.id === allocation.room_id) : null;
         
+        // Determine which price to use based on role and feature
+        let priceToUse = null;
+        let displayPriceToUse = null;
+        if (allocation) {
+          const actualPrice = Number(allocation.room_price_at_allocation || 0);
+          const displayPrice = allocation.display_price_at_allocation ? Number(allocation.display_price_at_allocation) : null;
+          
+          // Owners and Super Admins always see actual prices
+          // Custodians see display prices if feature is enabled and display price exists
+          if (isCustodian && markupEnabled && displayPrice !== null) {
+            priceToUse = displayPrice;
+            displayPriceToUse = displayPrice;
+          } else {
+            priceToUse = actualPrice;
+            displayPriceToUse = displayPrice || actualPrice; // Fallback to actual if no display
+          }
+        }
+        
         // Calculate payment summary
         let totalPaid = 0;
         let totalRequired = 0;
+        let displayTotalPaid = 0;
+        let displayTotalRequired = 0;
+        
         if (allocation) {
-          totalRequired = Number(allocation.room_price_at_allocation || 0);
+          const actualPrice = Number(allocation.room_price_at_allocation || 0);
+          const displayPrice = allocation.display_price_at_allocation ? Number(allocation.display_price_at_allocation) : null;
+          
+          // Actual amounts (for owner's records)
+          totalRequired = actualPrice;
           const allocationPayments = payments.filter((p) => p.allocation_id === allocation.id);
           totalPaid = allocationPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+          
+          // Display amounts (for student receipts/notifications)
+          if (displayPrice !== null) {
+            displayTotalRequired = displayPrice;
+            // Calculate display amount proportionally
+            // If actual:display ratio is 1M:1.2M, and student paid 500K actual, display = 600K
+            const markupRatio = displayPrice / actualPrice;
+            displayTotalPaid = totalPaid * markupRatio;
+          } else {
+            displayTotalRequired = actualPrice;
+            displayTotalPaid = totalPaid;
+          }
         }
 
         const studentData = {
@@ -378,18 +419,28 @@ router.get(
           room: room ? { id: room.id, name: room.name } : null,
           allocation: allocation ? {
             id: allocation.id,
-            room_price_at_allocation: allocation.room_price_at_allocation,
+            room_price_at_allocation: priceToUse, // Use display price for custodians if enabled
             allocated_at: allocation.allocated_at,
           } : null,
         };
 
         // Only include payment summary if user can view payments
         if (canViewPayments) {
-          studentData.paymentSummary = {
-            totalPaid,
-            totalRequired,
-            balance: totalRequired - totalPaid,
-          };
+          // For custodians with markup enabled, show display amounts
+          // For owners and super admins, show actual amounts
+          if (isCustodian && markupEnabled && allocation?.display_price_at_allocation) {
+            studentData.paymentSummary = {
+              totalPaid: displayTotalPaid,
+              totalRequired: displayTotalRequired,
+              balance: displayTotalRequired - displayTotalPaid,
+            };
+          } else {
+            studentData.paymentSummary = {
+              totalPaid,
+              totalRequired,
+              balance: totalRequired - totalPaid,
+            };
+          }
         } else {
           // Hide payment information for Hostel Owners when setting is disabled
           studentData.paymentSummary = null;

@@ -92,11 +92,15 @@ async function runMigrations(pool) {
       student_id INT NOT NULL,
       room_id INT NOT NULL,
       room_price_at_allocation DECIMAL(10, 2) NOT NULL,
+      display_price_at_allocation DECIMAL(10, 2) NULL,
       allocated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (student_id) REFERENCES students(id),
       FOREIGN KEY (room_id) REFERENCES rooms(id)
     )
   `);
+  
+  // Add display_price_at_allocation column if it doesn't exist (for existing databases)
+  await addColumnIfMissing('allocations', 'display_price_at_allocation DECIMAL(10, 2) NULL', 'display_price_at_allocation');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (

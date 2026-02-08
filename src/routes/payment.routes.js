@@ -6,6 +6,7 @@ const { authenticateToken, authorizeRoles } = require('../middleware/auth.middle
 const { writeAuditLog } = require('../utils/audit.util');
 const { createRegistrationEmailHTML, sendEmailWithHistory } = require('../utils/email.util');
 const { createRegistrationMessage, sendSMSWithHistory } = require('../utils/sms.util');
+const { isCustodianPriceMarkupEnabled } = require('../utils/feature-settings.util');
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ const allocationSchema = Joi.object({
   studentId: Joi.number().integer().required(),
   roomId: Joi.number().integer().required(),
   hostelId: Joi.number().integer().optional(), // SUPER_ADMIN can supply
+  displayPrice: Joi.number().precision(2).min(0.01).optional(), // Display price shown to student (only when feature enabled)
 });
 
 const paymentSchema = Joi.object({
@@ -31,7 +33,7 @@ router.post(
       if (error) {
         return res.status(400).json({ error: error.details[0].message });
       }
-      const { studentId, roomId, hostelId } = value;
+      const { studentId, roomId, hostelId, displayPrice } = value;
       const db = getDb();
 
       // Determine hostel scope
@@ -147,11 +149,45 @@ router.post(
         pricePerStudent = roomPrice / roomCapacity;
       }
 
+      // Check if custodian price markup feature is enabled
+      const markupEnabled = await isCustodianPriceMarkupEnabled(effectiveHostelId);
+      let displayPricePerStudent = null;
+
+      // Validate displayPrice if provided
+      if (displayPrice !== undefined) {
+        if (!markupEnabled) {
+          return res.status(400).json({ 
+            error: 'Display price is only allowed when custodian price markup feature is enabled for this hostel' 
+          });
+        }
+        
+        // Only CUSTODIAN role can set display prices
+        if (req.user.role !== 'CUSTODIAN') {
+          return res.status(403).json({ 
+            error: 'Only custodians can set display prices when the feature is enabled' 
+          });
+        }
+
+        // Calculate display price per student (same logic as actual price)
+        if (roomCapacity === 1) {
+          displayPricePerStudent = Number(displayPrice);
+        } else {
+          displayPricePerStudent = Number(displayPrice) / roomCapacity;
+        }
+
+        // Validate display price is not less than actual price
+        if (displayPricePerStudent < pricePerStudent) {
+          return res.status(400).json({ 
+            error: 'Display price cannot be less than the actual room price' 
+          });
+        }
+      }
+
       // Create allocation with snapshot of price per student (fixed based on capacity)
       // This price never changes - each student pays their own independent share
       const [result] = await db.execute(
-        'INSERT INTO allocations (hostel_id, semester_id, student_id, room_id, room_price_at_allocation) VALUES (?, ?, ?, ?, ?)',
-        [effectiveHostelId, studentSemesterId, studentId, room.id, pricePerStudent],
+        'INSERT INTO allocations (hostel_id, semester_id, student_id, room_id, room_price_at_allocation, display_price_at_allocation) VALUES (?, ?, ?, ?, ?, ?)',
+        [effectiveHostelId, studentSemesterId, studentId, room.id, pricePerStudent, displayPricePerStudent],
       );
 
       await writeAuditLog(db, req, {
@@ -168,7 +204,8 @@ router.post(
       const studentName = student.full_name || 'Student';
       const roomNumber = student.room_name || room.id.toString();
       const amountPaid = 0; // No payment yet
-      const amountLeft = pricePerStudent;
+      // Use display price for student notifications if available, otherwise use actual price
+      const amountLeft = displayPricePerStudent || pricePerStudent;
 
       // Try email first if student has email
       if (student.email) {
@@ -269,7 +306,7 @@ router.post(
 
       // Ensure allocation exists
       const [allocRows] = await db.execute(
-        'SELECT id, hostel_id, semester_id, room_price_at_allocation FROM allocations WHERE id = ? LIMIT 1',
+        'SELECT id, hostel_id, semester_id, room_price_at_allocation, display_price_at_allocation FROM allocations WHERE id = ? LIMIT 1',
         [allocationId],
       );
       if (!allocRows.length) {
@@ -283,13 +320,19 @@ router.post(
         }
       }
 
-      // Check current balance before recording payment
+      // Check if markup is enabled for this hostel
+      const markupEnabled = await isCustodianPriceMarkupEnabled(allocation.hostel_id);
+      const actualPrice = Number(allocation.room_price_at_allocation || 0);
+      const displayPrice = allocation.display_price_at_allocation ? Number(allocation.display_price_at_allocation) : null;
+      const markupRatio = displayPrice && markupEnabled ? displayPrice / actualPrice : 1;
+
+      // Check current balance before recording payment (using actual amounts)
       const [currentTotalRows] = await db.execute(
         'SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE allocation_id = ?',
         [allocationId],
       );
       const currentTotalPaid = Number(currentTotalRows[0].total_paid || 0);
-      const totalRequired = Number(allocation.room_price_at_allocation || 0);
+      const totalRequired = actualPrice; // Always use actual price for validation
       const currentBalance = totalRequired - currentTotalPaid;
 
       // Prevent overpayment - check if payment would exceed the balance
@@ -343,6 +386,11 @@ router.post(
       );
       const totalPaid = Number(totalRows[0].total_paid || 0);
       const balance = totalRequired - totalPaid;
+      
+      // Calculate display amounts for student notifications
+      const displayTotalPaid = totalPaid * markupRatio;
+      const displayTotalRequired = displayPrice || actualPrice;
+      const displayBalance = displayTotalRequired - displayTotalPaid;
 
       // Send updated notification: Email first, SMS fallback if no email
       let emailResult = null;
@@ -370,12 +418,13 @@ router.post(
           // Try email first if student has email
           if (student.email) {
             try {
+              // Use display amounts for student notifications
               const html = createRegistrationEmailHTML(
                 hostelName,
                 studentName,
                 roomNumber,
-                totalPaid,
-                balance
+                displayTotalPaid,
+                displayBalance
               );
 
               emailResult = await sendEmailWithHistory({
@@ -391,12 +440,13 @@ router.post(
               // Fallback to SMS if email fails and phone exists
               if (student.phone) {
                 try {
+                  // Use display amounts for student notifications
                   const message = createRegistrationMessage(
                     hostelName,
                     studentName,
                     roomNumber,
-                    totalPaid,
-                    balance
+                    displayTotalPaid,
+                    displayBalance
                   );
                   smsResult = await sendSMSWithHistory({
                     studentId: student.student_id,
@@ -413,12 +463,13 @@ router.post(
           } else if (student.phone) {
             // No email, try SMS
             try {
+              // Use display amounts for student notifications
               const message = createRegistrationMessage(
                 hostelName,
                 studentName,
                 roomNumber,
-                totalPaid,
-                balance
+                displayTotalPaid,
+                displayBalance
               );
               smsResult = await sendSMSWithHistory({
                 studentId: student.student_id,

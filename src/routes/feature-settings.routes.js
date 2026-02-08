@@ -17,6 +17,7 @@ const VALID_FEATURES = [
   'receipts',
   'dashboard_quick_actions', // Quick action buttons on dashboard
   'owner_view_payment_amounts', // Allow Hostel Owners to see payment amounts for students
+  'allow_custodian_price_markup', // Allow custodians to set display prices different from actual prices
 ];
 
 const updateFeatureSettingsSchema = Joi.object({
