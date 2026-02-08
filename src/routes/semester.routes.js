@@ -97,7 +97,8 @@ router.get(
       }
 
       if (row.length === 0) {
-        return res.status(404).json({ error: 'No active semester found' });
+        // Return null instead of 404 - this is a valid state (no active semester)
+        return res.json(null);
       }
 
       return res.json(row[0]);
